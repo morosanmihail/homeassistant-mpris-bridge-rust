@@ -1,0 +1,15 @@
+[package]
+name = "homeassistant-mpris-bridge-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eyre = "0.6.12"
+futures-util = "0.3.30"
+mpris = "2.0.1"
+mpris-player = "0.6.3"
+reqwest = { version = "0.12.4", features = ["json"] }
+serde = { version = "1.0.203", features = ["derive"] }
+serde_json = "1.0.117"
+tokio = { version = "=1.37.0", features = ["full"] }
+tokio-tungstenite = "0.24.0"
