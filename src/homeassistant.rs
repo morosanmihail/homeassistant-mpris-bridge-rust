@@ -7,11 +7,50 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct MediaPlayer {
-    entity_id: String,
-    state: String,
-    attributes: HashMap<String, serde_json::Value>,
+    pub entity_id: String,
+    pub state: String,
+    pub attributes: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct MediaPlayerState {
+    ha_url: String,
+    ha_token: String,
+    pub playing: bool,
+    pub json_player: MediaPlayer,
+}
+
+impl MediaPlayerState {
+    pub fn new(player: MediaPlayer, ha_url: String, ha_token: String) -> Result<Self> {
+        Ok(Self {
+            ha_token,
+            ha_url,
+            json_player: player,
+            playing: false,
+        })
+    }
+
+    pub async fn send_command_to_home_assistant(
+        &self,
+        client: &Client,
+        command: &str,
+    ) -> Result<()> {
+        let url = format!("{}/api/services/media_player/{}", self.ha_url, command);
+        let params = serde_json::json!({
+            "entity_id": self.json_player.entity_id,
+        });
+
+        client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.ha_token))
+            .json(&params)
+            .send()
+            .await?;
+
+        Ok(())
+    }
 }
 
 pub async fn get_media_players(
@@ -68,10 +107,10 @@ pub async fn listen_for_events(ha_url: String, access_token: String) -> Result<(
     while let Some(Ok(message)) = read.next().await {
         if let Message::Text(text) = message {
             let event: serde_json::Value = serde_json::from_str(&text).expect("Invalid JSON");
-            match event["event"]["data"]["entity_id"].as_str() {
-                Some("media_player.living_room_2") => println!("Heya!"),
-                _ => println!("Not heya!"),
-            };
+            //match event["event"]["data"]["entity_id"].as_str() {
+            //    Some("media_player.living_room_2") => println!("Heya!"),
+            //    _ => println!("Not heya!"),
+            //};
             //println!("Received event: {}", event);
         }
     }

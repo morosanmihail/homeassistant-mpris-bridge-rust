@@ -1,88 +1,13 @@
+use std::sync::Arc;
+
 use eyre::Result;
-use homeassistant::{get_media_players, listen_for_events};
+use homeassistant::{get_media_players, listen_for_events, MediaPlayerState};
+use mpris::new_mpris_player;
 use reqwest::Client;
-use tokio::task::JoinSet;
+use tokio::{sync::Mutex, task::JoinSet};
 
 mod homeassistant;
-
-//fn create_mpris_player(name: String) -> Player {
-//    // Find or create
-//    match PlayerFinder::new().expect("Need it").find_by_name(&name) {
-//        Ok(p) => p,
-//        Err(err) => Player::new(name).unwrap(),
-//    }
-//}
-
-async fn send_command_to_home_assistant(
-    client: &Client,
-    home_assistant_url: &str,
-    token: &str,
-    entity_id: &str,
-    command: &str,
-) -> Result<()> {
-    let url = format!(
-        "{}/api/services/media_player/{}",
-        home_assistant_url, command
-    );
-    let params = serde_json::json!({
-        "entity_id": entity_id,
-    });
-
-    client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", token))
-        .json(&params)
-        .send()
-        .await?;
-
-    Ok(())
-}
-
-//async fn main_loop(client: &Client, home_assistant_url: &str, token: &str, media_players: Vec<MediaPlayer>) -> Result<()> {
-//    for player in media_players {
-//        if player.entity_id.starts_with("media_player.") {
-//            let name = player.entity_id.replace("media_player.", "");
-//            let mplayer = create_mpris_player(name.clone());
-//
-//            // Set initial playback status based on the state
-//            match player.state.as_str() {
-//                "playing" => mplayer.set_playback_status(PlaybackStatus::Playing),
-//                "paused" => mplayer.set_playback_status(PlaybackStatus::Paused),
-//                "stopped" => mplayer.set_playback_status(PlaybackStatus::Stopped),
-//                _ => (),
-//            }
-//
-//            println!("Created MPRIS player for: {}", &name);
-//
-//            let client_clone = client.clone();
-//            let home_assistant_url_clone = home_assistant_url.to_string();
-//            let token_clone = token.to_string();
-//            let entity_id_clone = player.entity_id.clone();
-//            let name_clone = name.clone();
-//
-//            // tokio::spawn(async move {
-//            //     let player = PlayerFinder::new().expect("Need it").find_by_name(name_clone).unwrap(); // TODO remove expect and unwrap
-//            //     let mut events = player.events().unwrap();
-//            //     while let Some(event) = events.next().await {
-//            //         match event {
-//            //             PlayerEvent::Play => {
-//            //                 send_command_to_home_assistant(&client_clone, &home_assistant_url_clone, &token_clone, &entity_id_clone, "media_play").await.unwrap();
-//            //             }
-//            //             PlayerEvent::Pause => {
-//            //                 send_command_to_home_assistant(&client_clone, &home_assistant_url_clone, &token_clone, &entity_id_clone, "media_pause").await.unwrap();
-//            //             }
-//            //             PlayerEvent::Next => {
-//            //                 send_command_to_home_assistant(&client_clone, &home_assistant_url_clone, &token_clone, &entity_id_clone, "media_next_track").await.unwrap();
-//            //             }
-//            //             _ => {}
-//            //         }
-//            //     }
-//            // });
-//        }
-//    }
-//
-//    Ok(())
-//}
+mod mpris;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -94,20 +19,30 @@ async fn main() -> Result<()> {
         .await
         .unwrap();
 
+    let mut set = JoinSet::new();
     for player in media_players {
-        //println!("{:?}\n", player);
-
-        // for each configured media player (that we follow)
-        // create one loop that listens to mpris events and sends them back to HA
+        if player.entity_id.eq("media_player.living_room_2") {
+            println!("{:?}\n", player);
+            let Ok(player_state) = MediaPlayerState::new(
+                player.clone(),
+                home_assistant_url.to_string(),
+                token.to_string(),
+            ) else {
+                continue;
+            };
+            let _mp_task = set.spawn(new_mpris_player(Arc::new(Mutex::new(player_state.clone()))));
+        }
     }
 
-    let mut set = JoinSet::new();
+    println!("Got media players");
 
     let _ha_task = set.spawn(listen_for_events(
         "ws://192.168.1.27:8123/api/websocket".to_string(),
         token.to_string(),
     ));
 
-    while let _ = set.join_next().await {}
+    println!("Spawned threads, now waiting.");
+
+    while (set.join_next().await).is_some() {}
     Ok(())
 }
