@@ -1,16 +1,15 @@
-use std::sync::Arc;
-
 use mpris_server::{
-    zbus::fdo, LoopStatus, Metadata, PlaybackRate, PlaybackStatus, PlayerInterface, RootInterface,
-    Server, Time, TrackId, Volume,
+    zbus::fdo, LoopStatus, Metadata, PlaybackRate, PlaybackStatus, PlayerInterface, Property,
+    RootInterface, Server, Time, TrackId, Volume,
 };
-use tokio::sync::Mutex;
+use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::homeassistant::MediaPlayerState;
+use crate::homeassistant::{HAEvent, MediaPlayer};
 
 #[derive(Clone)]
 pub struct MyPlayer {
-    state: Arc<Mutex<MediaPlayerState>>,
+    ha_sender: tokio::sync::mpsc::Sender<HAEvent>,
+    pub start_state: MediaPlayer,
 }
 
 impl RootInterface for MyPlayer {
@@ -19,7 +18,7 @@ impl RootInterface for MyPlayer {
     }
 
     async fn quit(&self) -> fdo::Result<()> {
-        todo!()
+        Ok(())
     }
 
     async fn can_quit(&self) -> fdo::Result<bool> {
@@ -30,8 +29,8 @@ impl RootInterface for MyPlayer {
         Ok(true)
     }
 
-    async fn set_fullscreen(&self, fullscreen: bool) -> mpris_server::zbus::Result<()> {
-        todo!()
+    async fn set_fullscreen(&self, _fullscreen: bool) -> mpris_server::zbus::Result<()> {
+        Ok(())
     }
 
     async fn can_set_fullscreen(&self) -> fdo::Result<bool> {
@@ -65,80 +64,96 @@ impl RootInterface for MyPlayer {
 
 impl PlayerInterface for MyPlayer {
     async fn next(&self) -> fdo::Result<()> {
-        todo!()
+        Ok(())
     }
 
     async fn previous(&self) -> fdo::Result<()> {
-        todo!()
+        Ok(())
     }
 
     async fn pause(&self) -> fdo::Result<()> {
-        self.state.lock().await.playing = false;
+        let _ = self.ha_sender.send(HAEvent::Pause).await;
         Ok(())
     }
 
     async fn play_pause(&self) -> fdo::Result<()> {
-        self.state.lock().await.playing = !self.state.lock().await.playing;
+        let _ = self.ha_sender.send(HAEvent::Play).await;
         Ok(())
     }
 
     async fn stop(&self) -> fdo::Result<()> {
-        todo!()
-    }
-
-    async fn play(&self) -> fdo::Result<()> {
-        self.state.lock().await.playing = true;
         Ok(())
     }
 
-    async fn seek(&self, offset: Time) -> fdo::Result<()> {
-        todo!()
+    async fn play(&self) -> fdo::Result<()> {
+        let _ = self.ha_sender.send(HAEvent::Play).await;
+        Ok(())
     }
 
-    async fn set_position(&self, track_id: TrackId, position: Time) -> fdo::Result<()> {
-        todo!()
+    async fn seek(&self, _offset: Time) -> fdo::Result<()> {
+        Ok(())
     }
 
-    async fn open_uri(&self, uri: String) -> fdo::Result<()> {
-        todo!()
+    async fn set_position(&self, _track_id: TrackId, _position: Time) -> fdo::Result<()> {
+        Ok(())
+    }
+
+    async fn open_uri(&self, _uri: String) -> fdo::Result<()> {
+        Ok(())
     }
 
     async fn playback_status(&self) -> fdo::Result<PlaybackStatus> {
-        Ok(match self.state.lock().await.playing {
-            true => PlaybackStatus::Playing,
-            false => PlaybackStatus::Paused,
-        })
+        Ok(PlaybackStatus::Paused)
     }
 
     async fn loop_status(&self) -> fdo::Result<LoopStatus> {
         Ok(LoopStatus::Track)
     }
 
-    async fn set_loop_status(&self, loop_status: LoopStatus) -> mpris_server::zbus::Result<()> {
-        todo!()
+    async fn set_loop_status(&self, _loop_status: LoopStatus) -> mpris_server::zbus::Result<()> {
+        Ok(())
     }
 
     async fn rate(&self) -> fdo::Result<PlaybackRate> {
         Ok(PlaybackRate::NEG_INFINITY)
     }
 
-    async fn set_rate(&self, rate: PlaybackRate) -> mpris_server::zbus::Result<()> {
-        todo!()
+    async fn set_rate(&self, _rate: PlaybackRate) -> mpris_server::zbus::Result<()> {
+        Ok(())
     }
 
     async fn shuffle(&self) -> fdo::Result<bool> {
         Ok(true)
     }
 
-    async fn set_shuffle(&self, shuffle: bool) -> mpris_server::zbus::Result<()> {
-        todo!()
+    async fn set_shuffle(&self, _shuffle: bool) -> mpris_server::zbus::Result<()> {
+        Ok(())
     }
 
     async fn metadata(&self) -> fdo::Result<Metadata> {
+        let title = self
+            .start_state
+            .attributes
+            .get("media_title")
+            .unwrap()
+            .to_string();
+        let artist = self
+            .start_state
+            .attributes
+            .get("media_artist")
+            .unwrap()
+            .to_string();
+        let duration = self
+            .start_state
+            .attributes
+            .get("media_duration")
+            .unwrap()
+            .as_i64()
+            .unwrap();
         Ok(Metadata::builder()
-            .title("TEST")
-            .artist(["TEST ARTIST"])
-            .length(Time::from_secs(123))
+            .title(title.trim_matches(['\"']))
+            .artist(vec![artist.trim_matches(['\"'])])
+            .length(Time::from_secs(duration))
             .build())
     }
 
@@ -146,12 +161,12 @@ impl PlayerInterface for MyPlayer {
         Ok(Volume::MIN)
     }
 
-    async fn set_volume(&self, volume: Volume) -> mpris_server::zbus::Result<()> {
-        todo!()
+    async fn set_volume(&self, _volume: Volume) -> mpris_server::zbus::Result<()> {
+        Ok(())
     }
 
     async fn position(&self) -> fdo::Result<Time> {
-        Ok(Time::MIN)
+        Ok(Time::ZERO)
     }
 
     async fn minimum_rate(&self) -> fdo::Result<PlaybackRate> {
@@ -179,7 +194,7 @@ impl PlayerInterface for MyPlayer {
     }
 
     async fn can_seek(&self) -> fdo::Result<bool> {
-        Ok(true)
+        Ok(false)
     }
 
     async fn can_control(&self) -> fdo::Result<bool> {
@@ -187,14 +202,57 @@ impl PlayerInterface for MyPlayer {
     }
 }
 
-pub async fn new_mpris_player(player: Arc<Mutex<MediaPlayerState>>) -> eyre::Result<()> {
-    let _player = Server::new(
-        player.lock().await.json_player.entity_id.as_str(),
+pub async fn new_mpris_player(
+    entity_id: String,
+    start_state: MediaPlayer,
+    mut rx: Receiver<HAEvent>,
+    ha_sender: Sender<HAEvent>,
+) -> eyre::Result<()> {
+    let player = Server::new(
+        &entity_id,
         MyPlayer {
-            state: player.clone(),
+            start_state,
+            ha_sender,
+            position: 0,
         },
     )
     .await?;
 
-    loop {}
+    loop {
+        if let Some(i) = rx.recv().await {
+            println!("Got an event! {:?}", i);
+            match i {
+                HAEvent::Play => {
+                    player
+                        .properties_changed([Property::PlaybackStatus(PlaybackStatus::Playing)])
+                        .await?;
+                }
+                HAEvent::Pause => {
+                    player
+                        .properties_changed([Property::PlaybackStatus(PlaybackStatus::Paused)])
+                        .await?;
+                }
+                HAEvent::MetadataUpdated((title, artist, duration, position)) => {
+                    player
+                        .properties_changed([
+                            Property::CanSeek(false),
+                            Property::Metadata(
+                                Metadata::builder()
+                                    .title(title.trim_matches(['\"']))
+                                    .artist(vec![artist.trim_matches(['\"'])])
+                                    .length(Time::from_secs(duration))
+                                    .build(),
+                            ),
+                        ])
+                        .await?;
+
+                    player
+                        .emit(mpris_server::Signal::Seeked {
+                            position: Time::from_secs(position),
+                        })
+                        .await?;
+                }
+            }
+        }
+    }
 }
