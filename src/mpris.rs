@@ -3,12 +3,15 @@ use mpris_server::{
     RootInterface, Server, Time, TrackId, Volume,
 };
 use tokio::sync::mpsc::{Receiver, Sender};
+use url::Url;
 
 use crate::homeassistant::{HAEvent, MediaPlayer};
 
 #[derive(Clone)]
 pub struct MyPlayer {
-    ha_sender: tokio::sync::mpsc::Sender<HAEvent>,
+    base_url: String,
+    entity_id: String,
+    ha_sender: tokio::sync::mpsc::Sender<(String, HAEvent)>,
     pub start_state: MediaPlayer,
 }
 
@@ -64,20 +67,34 @@ impl RootInterface for MyPlayer {
 
 impl PlayerInterface for MyPlayer {
     async fn next(&self) -> fdo::Result<()> {
+        let _ = self
+            .ha_sender
+            .send((self.entity_id.clone(), HAEvent::Next))
+            .await;
         Ok(())
     }
 
     async fn previous(&self) -> fdo::Result<()> {
+        let _ = self
+            .ha_sender
+            .send((self.entity_id.clone(), HAEvent::Previous))
+            .await;
         Ok(())
     }
 
     async fn pause(&self) -> fdo::Result<()> {
-        let _ = self.ha_sender.send(HAEvent::Pause).await;
+        let _ = self
+            .ha_sender
+            .send((self.entity_id.clone(), HAEvent::Pause))
+            .await;
         Ok(())
     }
 
     async fn play_pause(&self) -> fdo::Result<()> {
-        let _ = self.ha_sender.send(HAEvent::Play).await;
+        let _ = self
+            .ha_sender
+            .send((self.entity_id.clone(), HAEvent::Play))
+            .await;
         Ok(())
     }
 
@@ -86,7 +103,10 @@ impl PlayerInterface for MyPlayer {
     }
 
     async fn play(&self) -> fdo::Result<()> {
-        let _ = self.ha_sender.send(HAEvent::Play).await;
+        let _ = self
+            .ha_sender
+            .send((self.entity_id.clone(), HAEvent::Play))
+            .await;
         Ok(())
     }
 
@@ -103,7 +123,11 @@ impl PlayerInterface for MyPlayer {
     }
 
     async fn playback_status(&self) -> fdo::Result<PlaybackStatus> {
-        Ok(PlaybackStatus::Paused)
+        if self.start_state.state.contains("playing") {
+            Ok(PlaybackStatus::Playing)
+        } else {
+            Ok(PlaybackStatus::Paused)
+        }
     }
 
     async fn loop_status(&self) -> fdo::Result<LoopStatus> {
@@ -150,10 +174,23 @@ impl PlayerInterface for MyPlayer {
             .unwrap()
             .as_i64()
             .unwrap();
+        let art = self
+            .start_state
+            .attributes
+            .get("entity_picture")
+            .unwrap()
+            .to_string();
         Ok(Metadata::builder()
             .title(title.trim_matches(['\"']))
             .artist(vec![artist.trim_matches(['\"'])])
             .length(Time::from_secs(duration))
+            .art_url(
+                validate_art_url(art.trim_matches(['\"']).to_string(), self.base_url.clone())
+                    .unwrap_or(
+                        Url::parse("http://example.com").expect("Default URL is always valid"),
+                    )
+                    .to_string(),
+            )
             .build())
     }
 
@@ -205,12 +242,15 @@ impl PlayerInterface for MyPlayer {
 pub async fn new_mpris_player(
     entity_id: String,
     start_state: MediaPlayer,
+    base_url: String,
     mut rx: Receiver<HAEvent>,
-    ha_sender: Sender<HAEvent>,
+    ha_sender: Sender<(String, HAEvent)>,
 ) -> eyre::Result<()> {
     let player = Server::new(
-        &entity_id,
+        &entity_id.clone(),
         MyPlayer {
+            base_url: base_url.clone(),
+            entity_id,
             start_state,
             ha_sender,
         },
@@ -219,7 +259,6 @@ pub async fn new_mpris_player(
 
     loop {
         if let Some(i) = rx.recv().await {
-            println!("Got an event! {:?}", i);
             match i {
                 HAEvent::Play => {
                     player
@@ -231,7 +270,7 @@ pub async fn new_mpris_player(
                         .properties_changed([Property::PlaybackStatus(PlaybackStatus::Paused)])
                         .await?;
                 }
-                HAEvent::MetadataUpdated((title, artist, duration, position)) => {
+                HAEvent::MetadataUpdated((title, artist, duration, position, art_url)) => {
                     player
                         .properties_changed([
                             Property::CanSeek(false),
@@ -240,6 +279,13 @@ pub async fn new_mpris_player(
                                     .title(title.trim_matches(['\"']))
                                     .artist(vec![artist.trim_matches(['\"'])])
                                     .length(Time::from_secs(duration))
+                                    .art_url(
+                                        validate_art_url(
+                                            art_url.trim_matches(['\"']).to_string(),
+                                            base_url.clone(),
+                                        )?
+                                        .to_string(),
+                                    )
                                     .build(),
                             ),
                         ])
@@ -251,7 +297,21 @@ pub async fn new_mpris_player(
                         })
                         .await?;
                 }
+                _ => {}
             }
         }
+    }
+}
+
+fn validate_art_url(art_url: String, base_url: String) -> eyre::Result<Url> {
+    let parsed_url = url::Url::parse(&art_url);
+
+    match parsed_url {
+        Ok(url) => Ok(url),
+        Err(url::ParseError::RelativeUrlWithoutBase) => {
+            let base = url::Url::parse(&base_url)?;
+            base.join(&art_url).map_err(|_e| eyre::eyre!("Oh no"))
+        }
+        Err(_e) => Err(eyre::eyre!("Oh no")),
     }
 }

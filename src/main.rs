@@ -1,24 +1,62 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, io::Write, path::PathBuf};
 
-use eyre::Result;
+use eyre::{OptionExt, Result};
 use homeassistant::{get_media_players, listen_for_events, MediaPlayerState};
 use mpris::new_mpris_player;
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, task::JoinSet};
 
 mod homeassistant;
 mod mpris;
 
+#[derive(Debug, Deserialize, Serialize)]
+struct Config {
+    home_assistant_url: String,
+    home_assistant_token: String,
+    entity_ids: Vec<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            home_assistant_url: "YOUR_HA_URL_HERE".to_string(),
+            home_assistant_token: "YOUR_HA_TOKEN_HERE".to_string(),
+            entity_ids: vec!["YOUR_MEDIA".to_string(), "PLAYERS_HERE".to_string()],
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let home_assistant_url = "http://192.168.1.27:8123";
-    let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIzYWE5OTY2ZTkyZTc0NTg5ODE0ZDJmYTFkOWUxMTMyOSIsImlhdCI6MTcxODY1MTY1MCwiZXhwIjoyMDM0MDExNjUwfQ._-CbAO3yTtIfuu9hsSvpekb7Oy_VhFps8F4YJHbMdPs";
-    let entity_ids = vec!["media_player.living_room_2".to_string()];
+    let home_dir = dirs::home_dir().ok_or_eyre("Could not find home directory")?;
+    let config: PathBuf = home_dir.join(".config/ha_mpris_bridge/config.toml");
+
+    if let Some(parent_dir) = config.parent() {
+        std::fs::create_dir_all(parent_dir)?;
+    }
+
+    if !config.exists() {
+        let default_config = Config::default();
+        let toml_content = toml::to_string_pretty(&default_config)?;
+
+        let mut file = std::fs::File::create(&config)?;
+        file.write_all(toml_content.as_bytes())?;
+    }
+
+    let config = std::fs::read_to_string(&config)?;
+
+    let config: Config = toml::from_str(&config)?;
 
     let client = Client::new();
-    let media_players = get_media_players(&client, home_assistant_url, token, entity_ids)
-        .await
-        .unwrap();
+    let media_players = get_media_players(
+        &client,
+        &config.home_assistant_url,
+        &config.home_assistant_token,
+        config.entity_ids,
+    )
+    .await
+    .unwrap();
 
     // Channel to handle events from HA to MPRIS
     let mut channels = HashMap::new();
@@ -35,6 +73,7 @@ async fn main() -> Result<()> {
         let _mp_task = set.spawn(new_mpris_player(
             player.entity_id.clone(),
             player.clone(),
+            config.home_assistant_url.clone(),
             ha_rx,
             mpris_tx.clone(),
         ));
@@ -47,19 +86,29 @@ async fn main() -> Result<()> {
                 d.entity_id.clone(),
                 MediaPlayerState::new(
                     d.entity_id.clone(),
-                    home_assistant_url.to_string(),
-                    token.to_string(),
+                    config.home_assistant_url.to_string(),
+                    config.home_assistant_token.to_string(),
                 )
                 .unwrap(),
             )
         })
         .collect();
 
-    println!("THERE ARE {}", media_players.len());
-
+    let parsed_url = url::Url::parse(&config.home_assistant_url)?;
+    let websocket_url = format!(
+        "ws://{}{}/api/websocket",
+        parsed_url
+            .host_str()
+            .ok_or_eyre("Can not get host from HA URL")?,
+        match parsed_url.port() {
+            Some(v) => format!(":{}", v),
+            None => "".to_string(),
+        },
+    );
+    println!("Connected to {}", websocket_url);
     let _ha_task = set.spawn(listen_for_events(
-        "ws://192.168.1.27:8123/api/websocket".to_string(),
-        token.to_string(),
+        websocket_url,
+        config.home_assistant_token.to_string(),
         media_players,
         channels,
         mpris_rx,

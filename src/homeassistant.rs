@@ -12,6 +12,7 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 pub struct MediaPlayer {
     pub entity_id: String,
     pub attributes: HashMap<String, serde_json::Value>,
+    pub state: String,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -25,7 +26,9 @@ pub struct MediaPlayerState {
 pub enum HAEvent {
     Play,
     Pause,
-    MetadataUpdated((String, String, i64, i64)),
+    MetadataUpdated((String, String, i64, i64, String)),
+    Next,
+    Previous,
 }
 
 impl MediaPlayerState {
@@ -43,6 +46,16 @@ impl MediaPlayerState {
 
     pub async fn pause(&self) -> Result<()> {
         self.send_command_to_home_assistant("media_pause").await
+    }
+
+    pub async fn next(&self) -> Result<()> {
+        self.send_command_to_home_assistant("media_next_track")
+            .await
+    }
+
+    pub async fn previous(&self) -> Result<()> {
+        self.send_command_to_home_assistant("media_previous_track")
+            .await
     }
 
     pub async fn update_metadata(
@@ -75,14 +88,18 @@ impl MediaPlayerState {
                 .to_string(),
             attribs
                 .get("media_duration")
-                .unwrap_or(&Value::Number(serde_json::Number::from_f64(0.0).unwrap()))
+                .unwrap_or(&json!(0))
                 .as_i64()
                 .ok_or_eyre("Could not convert Number to i64")?,
             attribs
                 .get("media_position")
-                .unwrap_or(&Value::Number(serde_json::Number::from_f64(0.0).unwrap()))
+                .unwrap_or(&json!(0))
                 .as_i64()
                 .ok_or_eyre("Could not convert Number to i64")?,
+            attribs
+                .get("entity_picture")
+                .unwrap_or(&Value::String("".to_string()))
+                .to_string(),
         )));
         Ok(events)
     }
@@ -135,7 +152,7 @@ pub async fn listen_for_events(
     access_token: String,
     mut media_players: HashMap<String, MediaPlayerState>,
     channels: HashMap<String, Sender<HAEvent>>,
-    mut mpris_rx: Receiver<HAEvent>,
+    mut mpris_rx: Receiver<(String, HAEvent)>,
 ) -> Result<()> {
     let (ws_stream, _) = connect_async(ha_url).await?;
     let (mut write, mut read) = ws_stream.split();
@@ -176,12 +193,17 @@ pub async fn listen_for_events(
                     if let Some(entity_id) = entity
                     {
                         if let Some(media_player) = media_players.get_mut(entity_id) {
+                        if let Some(new_state) = event.get("event").and_then(|e| e.get("data")).and_then(|d| d.get("new_state")) {
+
+                            let attr = new_state.get("attributes");
+                            let state = new_state.get("state");
+
+                            if attr.is_some() && state.is_some() {
 
                         let events = media_player
                             .update_metadata(
-                                // TODO: fix these to now error
-                                event["event"]["data"]["new_state"]["attributes"].clone(),
-                                event["event"]["data"]["new_state"]["state"]
+                                attr.unwrap().clone(),
+                                state.unwrap().to_string().clone()
                                     .to_string()
                                     .clone(),
                             )
@@ -194,16 +216,23 @@ pub async fn listen_for_events(
                                 .send(e)
                                 .await?;
                         }
+                            }
+                        }
                         }
                     }
                 }
             }
-            Some(msg) = mpris_rx.recv() => {
+            Some((entity_id, msg)) = mpris_rx.recv() => {
+                let media = media_players.get_mut(&entity_id);
+                if let Some(mp) = media {
                 match msg {
-        HAEvent::Play => media_players.get_mut("media_player.living_room_2").unwrap().play().await?,
-        HAEvent::Pause => media_players.get_mut("media_player.living_room_2").unwrap().pause().await?,
-        HAEvent::MetadataUpdated(_) => todo!(),
+                    HAEvent::Play=> mp.play().await?,
+                    HAEvent::Pause=> mp.pause().await?,
+                    HAEvent::MetadataUpdated(_)=>todo!(),
+                    HAEvent::Next => mp.next().await?,
+                    HAEvent::Previous => mp.previous().await?,
                 };
+                }
             }
         }
     }
