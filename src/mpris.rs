@@ -1,8 +1,15 @@
+use std::sync::Arc;
+
+use eyre::OptionExt;
 use mpris_server::{
     zbus::fdo, LoopStatus, Metadata, PlaybackRate, PlaybackStatus, PlayerInterface, Property,
     RootInterface, Server, Time, TrackId, Volume,
 };
-use tokio::sync::mpsc::{Receiver, Sender};
+use serde_json::json;
+use tokio::sync::{
+    mpsc::{Receiver, Sender},
+    Mutex,
+};
 use url::Url;
 
 use crate::homeassistant::{HAEvent, MediaPlayer};
@@ -13,6 +20,7 @@ pub struct MyPlayer {
     entity_id: String,
     ha_sender: tokio::sync::mpsc::Sender<(String, HAEvent)>,
     pub start_state: MediaPlayer,
+    position: Arc<Mutex<i64>>,
 }
 
 impl RootInterface for MyPlayer {
@@ -53,15 +61,15 @@ impl RootInterface for MyPlayer {
     }
 
     async fn desktop_entry(&self) -> fdo::Result<String> {
-        Ok("AAAAH".to_string())
+        Ok("HomeAssistantPlayer".to_string())
     }
 
     async fn supported_uri_schemes(&self) -> fdo::Result<Vec<String>> {
-        Ok(vec!["uh".to_string()])
+        Ok(vec![])
     }
 
     async fn supported_mime_types(&self) -> fdo::Result<Vec<String>> {
-        Ok(vec!["uh".to_string()])
+        Ok(vec![])
     }
 }
 
@@ -139,7 +147,7 @@ impl PlayerInterface for MyPlayer {
     }
 
     async fn rate(&self) -> fdo::Result<PlaybackRate> {
-        Ok(PlaybackRate::NEG_INFINITY)
+        Ok(1.0)
     }
 
     async fn set_rate(&self, _rate: PlaybackRate) -> mpris_server::zbus::Result<()> {
@@ -203,15 +211,15 @@ impl PlayerInterface for MyPlayer {
     }
 
     async fn position(&self) -> fdo::Result<Time> {
-        Ok(Time::ZERO)
+        Ok(Time::from_secs(*self.position.lock().await))
     }
 
     async fn minimum_rate(&self) -> fdo::Result<PlaybackRate> {
-        Ok(PlaybackRate::MIN_POSITIVE)
+        Ok(1.0)
     }
 
     async fn maximum_rate(&self) -> fdo::Result<PlaybackRate> {
-        Ok(PlaybackRate::MIN_POSITIVE)
+        Ok(1.0)
     }
 
     async fn can_go_next(&self) -> fdo::Result<bool> {
@@ -246,16 +254,21 @@ pub async fn new_mpris_player(
     mut rx: Receiver<HAEvent>,
     ha_sender: Sender<(String, HAEvent)>,
 ) -> eyre::Result<()> {
-    let player = Server::new(
-        &entity_id.clone(),
-        MyPlayer {
-            base_url: base_url.clone(),
-            entity_id,
-            start_state,
-            ha_sender,
-        },
-    )
-    .await?;
+    let duration = start_state
+        .attributes
+        .get("media_position")
+        .unwrap_or(&json!(0))
+        .as_i64()
+        .ok_or_eyre("Could not convert Number to i64")?;
+    let position_lock = Arc::new(Mutex::new(duration));
+    let media_player = MyPlayer {
+        base_url: base_url.clone(),
+        entity_id: entity_id.clone(),
+        start_state,
+        ha_sender,
+        position: position_lock.clone(),
+    };
+    let player = Server::new(&entity_id.clone(), media_player).await?;
 
     loop {
         if let Some(i) = rx.recv().await {
@@ -290,7 +303,10 @@ pub async fn new_mpris_player(
                             ),
                         ])
                         .await?;
-
+                    {
+                        let mut pos = position_lock.lock().await;
+                        *pos = position;
+                    }
                     player
                         .emit(mpris_server::Signal::Seeked {
                             position: Time::from_secs(position),

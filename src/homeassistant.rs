@@ -225,13 +225,13 @@ pub async fn listen_for_events(
             Some((entity_id, msg)) = mpris_rx.recv() => {
                 let media = media_players.get_mut(&entity_id);
                 if let Some(mp) = media {
-                match msg {
-                    HAEvent::Play=> mp.play().await?,
-                    HAEvent::Pause=> mp.pause().await?,
-                    HAEvent::MetadataUpdated(_)=>todo!(),
-                    HAEvent::Next => mp.next().await?,
-                    HAEvent::Previous => mp.previous().await?,
-                };
+                    match msg {
+                        HAEvent::Play=> mp.play().await?,
+                        HAEvent::Pause=> mp.pause().await?,
+                        HAEvent::MetadataUpdated(_)=>todo!(),
+                        HAEvent::Next => mp.next().await?,
+                        HAEvent::Previous => mp.previous().await?,
+                    };
                 }
             }
         }
