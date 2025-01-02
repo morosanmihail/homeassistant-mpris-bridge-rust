@@ -213,7 +213,6 @@ pub async fn new_mpris_player(
         MyPlayer {
             start_state,
             ha_sender,
-            position: 0,
         },
     )
     .await?;
