@@ -167,26 +167,26 @@ impl PlayerInterface for MyPlayer {
             .start_state
             .attributes
             .get("media_title")
-            .unwrap()
+            .unwrap_or(&json!(""))
             .to_string();
         let artist = self
             .start_state
             .attributes
             .get("media_artist")
-            .unwrap()
+            .unwrap_or(&json!(""))
             .to_string();
         let duration = self
             .start_state
             .attributes
             .get("media_duration")
-            .unwrap()
+            .unwrap_or(&json!(0))
             .as_i64()
             .unwrap();
         let art = self
             .start_state
             .attributes
             .get("entity_picture")
-            .unwrap()
+            .unwrap_or(&json!(""))
             .to_string();
         Ok(Metadata::builder()
             .title(title.trim_matches(['\"']))

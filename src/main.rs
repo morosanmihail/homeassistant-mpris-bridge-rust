@@ -66,7 +66,6 @@ async fn main() -> Result<()> {
     let mut set = JoinSet::new();
 
     for player in &media_players {
-        println!("{:?}\n", player);
         let (ha_tx, ha_rx) = mpsc::channel(100);
         channels.insert(player.entity_id.clone(), ha_tx);
 
@@ -113,8 +112,6 @@ async fn main() -> Result<()> {
         channels,
         mpris_rx,
     ));
-
-    println!("Spawned threads, now waiting.");
 
     while (set.join_next().await).is_some() {}
     Ok(())
