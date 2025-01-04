@@ -11,6 +11,9 @@ This will eventually have feature parity, but it is not there yet.
 
 No instructions available right now beyond `git clone` this repository, then `cargo run`. 
 
+Altough, if you really want to, you could `cargo install --git https://github.com/morosanmihail/homeassistant-mpris-bridge-rust`.
+Then you can run this (as long as your `~/.cargo/bin` is in your `$PATH`) as `homeassistant-mpris-bridge-rust`.
+
 ## Configuration
 
 Configuration is stored in `~/.config/ha_mpris_bridge/config.toml`. 
