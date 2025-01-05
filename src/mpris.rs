@@ -1,26 +1,21 @@
 use std::sync::Arc;
 
-use eyre::OptionExt;
 use mpris_server::{
     zbus::fdo, LoopStatus, Metadata, PlaybackRate, PlaybackStatus, PlayerInterface, Property,
     RootInterface, Server, Time, TrackId, Volume,
 };
-use serde_json::json;
 use tokio::sync::{
     mpsc::{Receiver, Sender},
     Mutex,
 };
-use url::Url;
 
-use crate::homeassistant::{HAEvent, MediaPlayer};
+use crate::homeassistant::{json_to_metadata, HAEvent, MediaPlayer, MediaPlayerMetadata};
 
 #[derive(Clone)]
 pub struct MyPlayer {
-    base_url: String,
     entity_id: String,
     ha_sender: tokio::sync::mpsc::Sender<(String, HAEvent)>,
-    pub start_state: MediaPlayer,
-    position: Arc<Mutex<i64>>,
+    metadata: Arc<Mutex<MediaPlayerMetadata>>,
 }
 
 impl RootInterface for MyPlayer {
@@ -33,11 +28,11 @@ impl RootInterface for MyPlayer {
     }
 
     async fn can_quit(&self) -> fdo::Result<bool> {
-        Ok(true)
+        Ok(false)
     }
 
     async fn fullscreen(&self) -> fdo::Result<bool> {
-        Ok(true)
+        Ok(false)
     }
 
     async fn set_fullscreen(&self, _fullscreen: bool) -> mpris_server::zbus::Result<()> {
@@ -53,7 +48,7 @@ impl RootInterface for MyPlayer {
     }
 
     async fn has_track_list(&self) -> fdo::Result<bool> {
-        Ok(true)
+        Ok(false)
     }
 
     async fn identity(&self) -> fdo::Result<String> {
@@ -107,6 +102,7 @@ impl PlayerInterface for MyPlayer {
     }
 
     async fn stop(&self) -> fdo::Result<()> {
+        // TODO
         Ok(())
     }
 
@@ -131,7 +127,7 @@ impl PlayerInterface for MyPlayer {
     }
 
     async fn playback_status(&self) -> fdo::Result<PlaybackStatus> {
-        if self.start_state.state.contains("playing") {
+        if self.metadata.lock().await.playing {
             Ok(PlaybackStatus::Playing)
         } else {
             Ok(PlaybackStatus::Paused)
@@ -139,7 +135,7 @@ impl PlayerInterface for MyPlayer {
     }
 
     async fn loop_status(&self) -> fdo::Result<LoopStatus> {
-        Ok(LoopStatus::Track)
+        Ok(LoopStatus::None)
     }
 
     async fn set_loop_status(&self, _loop_status: LoopStatus) -> mpris_server::zbus::Result<()> {
@@ -155,7 +151,7 @@ impl PlayerInterface for MyPlayer {
     }
 
     async fn shuffle(&self) -> fdo::Result<bool> {
-        Ok(true)
+        Ok(false)
     }
 
     async fn set_shuffle(&self, _shuffle: bool) -> mpris_server::zbus::Result<()> {
@@ -163,55 +159,26 @@ impl PlayerInterface for MyPlayer {
     }
 
     async fn metadata(&self) -> fdo::Result<Metadata> {
-        let title = self
-            .start_state
-            .attributes
-            .get("media_title")
-            .unwrap_or(&json!(""))
-            .to_string();
-        let artist = self
-            .start_state
-            .attributes
-            .get("media_artist")
-            .unwrap_or(&json!(""))
-            .to_string();
-        let duration = self
-            .start_state
-            .attributes
-            .get("media_duration")
-            .unwrap_or(&json!(0))
-            .as_i64()
-            .unwrap();
-        let art = self
-            .start_state
-            .attributes
-            .get("entity_picture")
-            .unwrap_or(&json!(""))
-            .to_string();
+        let metadata = self.metadata.lock().await;
         Ok(Metadata::builder()
-            .title(title.trim_matches(['\"']))
-            .artist(vec![artist.trim_matches(['\"'])])
-            .length(Time::from_secs(duration))
-            .art_url(
-                validate_art_url(art.trim_matches(['\"']).to_string(), self.base_url.clone())
-                    .unwrap_or(
-                        Url::parse("http://example.com").expect("Default URL is always valid"),
-                    )
-                    .to_string(),
-            )
+            .title(metadata.title.clone())
+            .artist(vec![metadata.artist.clone()])
+            .length(Time::from_secs(metadata.duration))
+            .art_url(metadata.art_url.clone())
             .build())
     }
 
     async fn volume(&self) -> fdo::Result<Volume> {
-        Ok(Volume::MIN)
+        Ok(self.metadata.lock().await.volume)
     }
 
     async fn set_volume(&self, _volume: Volume) -> mpris_server::zbus::Result<()> {
+        // TODO
         Ok(())
     }
 
     async fn position(&self) -> fdo::Result<Time> {
-        Ok(Time::from_secs(*self.position.lock().await))
+        Ok(Time::from_secs(self.metadata.lock().await.position))
     }
 
     async fn minimum_rate(&self) -> fdo::Result<PlaybackRate> {
@@ -254,19 +221,17 @@ pub async fn new_mpris_player(
     mut rx: Receiver<HAEvent>,
     ha_sender: Sender<(String, HAEvent)>,
 ) -> eyre::Result<()> {
-    let duration = start_state
-        .attributes
-        .get("media_position")
-        .unwrap_or(&json!(0))
-        .as_i64()
-        .ok_or_eyre("Could not convert Number to i64")?;
-    let position_lock = Arc::new(Mutex::new(duration));
+    let metadata = json_to_metadata(
+        start_state.attributes,
+        start_state.state.contains("playing"),
+        base_url.clone(),
+    )?;
+
+    let metadata_lock = Arc::new(Mutex::new(metadata));
     let media_player = MyPlayer {
-        base_url: base_url.clone(),
         entity_id: entity_id.clone(),
-        start_state,
         ha_sender,
-        position: position_lock.clone(),
+        metadata: metadata_lock.clone(),
     };
     let player = Server::new(&entity_id.clone(), media_player).await?;
 
@@ -283,51 +248,34 @@ pub async fn new_mpris_player(
                         .properties_changed([Property::PlaybackStatus(PlaybackStatus::Paused)])
                         .await?;
                 }
-                HAEvent::MetadataUpdated((title, artist, duration, position, art_url)) => {
+                HAEvent::MetadataUpdated(metadata_update) => {
                     player
                         .properties_changed([
                             Property::CanSeek(false),
                             Property::Metadata(
                                 Metadata::builder()
-                                    .title(title.trim_matches(['\"']))
-                                    .artist(vec![artist.trim_matches(['\"'])])
-                                    .length(Time::from_secs(duration))
+                                    .title(metadata_update.title)
+                                    .artist(vec![metadata_update.artist])
+                                    .length(Time::from_secs(metadata_update.duration))
                                     .art_url(
-                                        validate_art_url(
-                                            art_url.trim_matches(['\"']).to_string(),
-                                            base_url.clone(),
-                                        )?
-                                        .to_string(),
+                                        metadata_update.art_url.trim_matches(['\"']).to_string(),
                                     )
                                     .build(),
                             ),
                         ])
                         .await?;
                     {
-                        let mut pos = position_lock.lock().await;
-                        *pos = position;
+                        let mut metadata = metadata_lock.lock().await;
+                        metadata.position = metadata_update.position;
                     }
                     player
                         .emit(mpris_server::Signal::Seeked {
-                            position: Time::from_secs(position),
+                            position: Time::from_secs(metadata_update.position),
                         })
                         .await?;
                 }
                 _ => {}
             }
         }
-    }
-}
-
-fn validate_art_url(art_url: String, base_url: String) -> eyre::Result<Url> {
-    let parsed_url = url::Url::parse(&art_url);
-
-    match parsed_url {
-        Ok(url) => Ok(url),
-        Err(url::ParseError::RelativeUrlWithoutBase) => {
-            let base = url::Url::parse(&base_url)?;
-            base.join(&art_url).map_err(|_e| eyre::eyre!("Oh no"))
-        }
-        Err(_e) => Err(eyre::eyre!("Oh no")),
     }
 }

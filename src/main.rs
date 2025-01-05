@@ -69,6 +69,7 @@ async fn main() -> Result<()> {
         let (ha_tx, ha_rx) = mpsc::channel(100);
         channels.insert(player.entity_id.clone(), ha_tx);
 
+        println!("{:?}", player.clone());
         let _mp_task = set.spawn(new_mpris_player(
             player.entity_id.clone(),
             player.clone(),

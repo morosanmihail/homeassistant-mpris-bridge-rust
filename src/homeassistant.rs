@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use url::Url;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct MediaPlayer {
@@ -23,12 +24,70 @@ pub struct MediaPlayerState {
 }
 
 #[derive(Debug)]
+pub struct MediaPlayerMetadata {
+    pub title: String,
+    pub artist: String,
+    pub duration: i64,
+    pub position: i64,
+    pub volume: f64,
+    pub art_url: String,
+    pub playing: bool,
+}
+
+#[derive(Debug)]
 pub enum HAEvent {
     Play,
     Pause,
-    MetadataUpdated((String, String, i64, i64, String)),
+    MetadataUpdated(MediaPlayerMetadata),
     Next,
     Previous,
+}
+
+pub fn json_to_metadata(
+    metadata: HashMap<String, serde_json::Value>,
+    playing: bool,
+    base_url: String,
+) -> Result<MediaPlayerMetadata> {
+    Ok(MediaPlayerMetadata {
+        title: metadata
+            .get("media_title")
+            .unwrap_or(&Value::String("".to_string()))
+            .to_string()
+            .trim_matches(['\"'])
+            .to_string(),
+        artist: metadata
+            .get("media_artist")
+            .unwrap_or(&Value::String("".to_string()))
+            .to_string()
+            .trim_matches(['\"'])
+            .to_string(),
+        duration: metadata
+            .get("media_duration")
+            .unwrap_or(&json!(0))
+            .as_i64()
+            .ok_or_eyre("Could not convert Number to i64")?,
+        position: metadata
+            .get("media_position")
+            .unwrap_or(&json!(0))
+            .as_i64()
+            .ok_or_eyre("Could not convert Number to i64")?,
+        art_url: validate_art_url(
+            metadata
+                .get("entity_picture")
+                .unwrap_or(&Value::String("".to_string()))
+                .to_string()
+                .trim_matches(['\"'])
+                .to_string(),
+            &base_url,
+        )?
+        .to_string(),
+        volume: metadata
+            .get("volume_level")
+            .unwrap_or(&json!(1.0))
+            .as_f64()
+            .ok_or_eyre("Could not convert Number to f64")?,
+        playing,
+    })
 }
 
 impl MediaPlayerState {
@@ -59,17 +118,10 @@ impl MediaPlayerState {
     }
 
     pub async fn update_metadata(
-        &mut self,
+        &self,
         metadata: serde_json::value::Value,
         state: String,
     ) -> Result<Vec<HAEvent>> {
-        let attribs: HashMap<String, serde_json::Value> =
-            if let serde_json::Value::Object(m) = metadata {
-                m.into_iter().collect()
-            } else {
-                return Ok(vec![]);
-            };
-
         let mut events = vec![];
 
         if state.eq("\"playing\"") {
@@ -77,30 +129,17 @@ impl MediaPlayerState {
         } else {
             events.push(HAEvent::Pause);
         }
-        events.push(HAEvent::MetadataUpdated((
-            attribs
-                .get("media_title")
-                .unwrap_or(&Value::String("".to_string()))
-                .to_string(),
-            attribs
-                .get("media_artist")
-                .unwrap_or(&Value::String("".to_string()))
-                .to_string(),
-            attribs
-                .get("media_duration")
-                .unwrap_or(&json!(0))
-                .as_i64()
-                .ok_or_eyre("Could not convert Number to i64")?,
-            attribs
-                .get("media_position")
-                .unwrap_or(&json!(0))
-                .as_i64()
-                .ok_or_eyre("Could not convert Number to i64")?,
-            attribs
-                .get("entity_picture")
-                .unwrap_or(&Value::String("".to_string()))
-                .to_string(),
-        )));
+        let attribs: HashMap<String, serde_json::Value> =
+            if let serde_json::Value::Object(m) = metadata {
+                m.into_iter().collect()
+            } else {
+                eyre::bail!("Oh no");
+            };
+        events.push(HAEvent::MetadataUpdated(json_to_metadata(
+            attribs,
+            state.contains("playing"),
+            self.ha_url.clone(),
+        )?));
         Ok(events)
     }
 
@@ -186,38 +225,38 @@ pub async fn listen_for_events(
 
     loop {
         tokio::select! {
-            Some(Ok(message)) = read.next() => {
-                if let Message::Text(text) = message {
-                    let event: serde_json::Value = serde_json::from_str(&text).expect("Invalid JSON");
-                    let entity = event.get("event").and_then(|e| e.get("data")).and_then(|d| d.get("entity_id")).and_then(|e| e.as_str());
-                    if let Some(entity_id) = entity
-                    {
-                        if let Some(media_player) = media_players.get_mut(entity_id) {
+            Some(Ok(Message::Text(text))) = read.next() => {
+                let event: serde_json::Value = serde_json::from_str(&text).expect("Invalid JSON");
+                let entity = event.get("event").and_then(|e| e.get("data")).and_then(|d| d.get("entity_id")).and_then(|e| e.as_str());
+                if let Some(entity_id) = entity
+                {
+                    if let Some(media_player) = media_players.get_mut(entity_id) {
+                        println!("{:?}", text);
                         if let Some(new_state) = event.get("event").and_then(|e| e.get("data")).and_then(|d| d.get("new_state")) {
-
                             let attr = new_state.get("attributes");
                             let state = new_state.get("state");
 
                             if attr.is_some() && state.is_some() {
-
-                        let events = media_player
-                            .update_metadata(
-                                attr.unwrap().clone(),
-                                state.unwrap().to_string().clone()
-                                    .to_string()
-                                    .clone(),
-                            )
-                            .await?;
-
-                        for e in events {
-                            channels
-                                .get(entity_id)
-                                .unwrap()
-                                .send(e)
-                                .await?;
-                        }
+                                match media_player
+                                    .update_metadata(
+                                        attr.unwrap().clone(),
+                                        state.unwrap().to_string().clone()
+                                            .to_string()
+                                            .clone(),
+                                    )
+                                    .await {
+                                    Ok(events) => {
+                                        for e in events {
+                                            channels
+                                                .get(entity_id)
+                                                .unwrap()
+                                                .send(e)
+                                                .await?;
+                                        }
+                                    },
+                                    Err(e) => println!("Died during metadata update event with {e}"),
+                                };
                             }
-                        }
                         }
                     }
                 }
@@ -228,12 +267,25 @@ pub async fn listen_for_events(
                     match msg {
                         HAEvent::Play=> mp.play().await?,
                         HAEvent::Pause=> mp.pause().await?,
-                        HAEvent::MetadataUpdated(_)=>todo!(),
                         HAEvent::Next => mp.next().await?,
                         HAEvent::Previous => mp.previous().await?,
+                        _ => {},
                     };
                 }
             }
         }
+    }
+}
+
+fn validate_art_url(art_url: String, base_url: &str) -> eyre::Result<Url> {
+    let parsed_url = url::Url::parse(&art_url);
+
+    match parsed_url {
+        Ok(url) => Ok(url),
+        Err(url::ParseError::RelativeUrlWithoutBase) => {
+            let base = url::Url::parse(base_url)?;
+            base.join(&art_url).map_err(|_e| eyre::eyre!("Oh no"))
+        }
+        Err(_e) => Err(eyre::eyre!("Oh no")),
     }
 }
