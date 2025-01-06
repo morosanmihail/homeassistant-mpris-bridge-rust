@@ -91,12 +91,12 @@ pub fn json_to_metadata(
 }
 
 impl MediaPlayerState {
-    pub fn new(entity_id: String, ha_url: String, ha_token: String) -> Result<Self> {
-        Ok(Self {
+    pub fn new(entity_id: String, ha_url: String, ha_token: String) -> Self {
+        Self {
             ha_token,
             ha_url,
             entity_id,
-        })
+        }
     }
 
     pub async fn play(&self) -> Result<()> {
@@ -163,11 +163,11 @@ impl MediaPlayerState {
 }
 
 pub async fn get_media_players(
-    client: &Client,
     home_assistant_url: &str,
     token: &str,
     entity_ids: Vec<String>,
 ) -> Result<Vec<MediaPlayer>> {
+    let client = Client::new();
     let url = format!("{}/api/states", home_assistant_url);
     let response = client
         .get(&url)
@@ -225,40 +225,42 @@ pub async fn listen_for_events(
 
     loop {
         tokio::select! {
-            Some(Ok(Message::Text(text))) = read.next() => {
-                let event: serde_json::Value = serde_json::from_str(&text).expect("Invalid JSON");
-                let entity = event.get("event").and_then(|e| e.get("data")).and_then(|d| d.get("entity_id")).and_then(|e| e.as_str());
-                if let Some(entity_id) = entity
-                {
-                    if let Some(media_player) = media_players.get_mut(entity_id) {
-                        println!("{:?}", text);
-                        if let Some(new_state) = event.get("event").and_then(|e| e.get("data")).and_then(|d| d.get("new_state")) {
-                            let attr = new_state.get("attributes");
-                            let state = new_state.get("state");
+            event = read.next() => {
+                match event {
+                    None => println!("Oh no, nothing here"),
+                    Some(Ok(Message::Text(text))) => {
+                        let event: serde_json::Value = serde_json::from_str(&text)?;
+                        if let Some(entity_id) = event.get("event").and_then(|e| e.get("data")).and_then(|d| d.get("entity_id")).and_then(|e| e.as_str())
+                        {
+                            if let Some(media_player) = media_players.get_mut(entity_id) {
+                                if let Some(new_state) = event.get("event").and_then(|e| e.get("data")).and_then(|d| d.get("new_state")) {
+                                    let attr = new_state.get("attributes");
+                                    let state = new_state.get("state");
 
-                            if attr.is_some() && state.is_some() {
-                                match media_player
-                                    .update_metadata(
-                                        attr.unwrap().clone(),
-                                        state.unwrap().to_string().clone()
-                                            .to_string()
-                                            .clone(),
-                                    )
-                                    .await {
-                                    Ok(events) => {
-                                        for e in events {
-                                            channels
-                                                .get(entity_id)
-                                                .unwrap()
-                                                .send(e)
-                                                .await?;
-                                        }
-                                    },
-                                    Err(e) => println!("Died during metadata update event with {e}"),
-                                };
+                                    if attr.is_some() && state.is_some() {
+                                        match media_player
+                                            .update_metadata(
+                                                attr.unwrap().clone(),
+                                                state.unwrap().to_string().clone(),
+                                            )
+                                            .await {
+                                            Ok(events) => {
+                                                for e in events {
+                                                    channels
+                                                        .get(entity_id)
+                                                        .unwrap()
+                                                        .send(e)
+                                                        .await?;
+                                                }
+                                            },
+                                            Err(e) => println!("Died during metadata update event with {e}"),
+                                        };
+                                    }
+                                }
                             }
                         }
-                    }
+                    },
+                    _ => {},
                 }
             }
             Some((entity_id, msg)) = mpris_rx.recv() => {

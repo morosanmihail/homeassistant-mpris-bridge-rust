@@ -3,7 +3,6 @@ use std::{collections::HashMap, io::Write, path::PathBuf};
 use eyre::{OptionExt, Result};
 use homeassistant::{get_media_players, listen_for_events, MediaPlayerState};
 use mpris::new_mpris_player;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, task::JoinSet};
 
@@ -29,6 +28,74 @@ impl Default for Config {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let config = get_config()?;
+    let media_players = get_media_players(
+        &config.home_assistant_url,
+        &config.home_assistant_token,
+        config.entity_ids,
+    )
+    .await
+    .unwrap();
+
+    let parsed_url = url::Url::parse(&config.home_assistant_url)?;
+    let websocket_url = format!(
+        "ws://{}{}/api/websocket",
+        parsed_url
+            .host_str()
+            .ok_or_eyre("Can not get host from HA URL")?,
+        match parsed_url.port() {
+            Some(v) => format!(":{}", v),
+            None => "".to_string(),
+        },
+    );
+
+    // Channel to handle events from HA to MPRIS
+    let mut channels = HashMap::new();
+
+    // Channel to handle events from MPRIS to HA
+    let (mpris_tx, mpris_rx) = mpsc::channel(100);
+    let mut set = JoinSet::new();
+
+    let mut media_player_states = HashMap::new();
+
+    for player in &media_players {
+        let (ha_tx, ha_rx) = mpsc::channel(100);
+        channels.insert(player.entity_id.clone(), ha_tx);
+
+        let _mp_task = set.spawn(new_mpris_player(
+            player.entity_id.clone(),
+            player.clone(),
+            config.home_assistant_url.clone(),
+            ha_rx,
+            mpris_tx.clone(),
+        ));
+
+        media_player_states.insert(
+            player.entity_id.clone(),
+            MediaPlayerState::new(
+                player.entity_id.clone(),
+                config.home_assistant_url.to_string(),
+                config.home_assistant_token.to_string(),
+            ),
+        );
+    }
+
+    println!("Connected to {}", websocket_url);
+    let _ha_task = set.spawn(listen_for_events(
+        websocket_url,
+        config.home_assistant_token.to_string(),
+        media_player_states,
+        channels,
+        mpris_rx,
+    ));
+
+    while (set.join_next().await).is_some() {
+        println!("------ GOT SOME RESULT");
+    }
+    Ok(())
+}
+
+fn get_config() -> eyre::Result<Config> {
     let home_dir = dirs::home_dir().ok_or_eyre("Could not find home directory")?;
     let config: PathBuf = home_dir.join(".config/ha_mpris_bridge/config.toml");
 
@@ -47,73 +114,5 @@ async fn main() -> Result<()> {
     let config = std::fs::read_to_string(&config)?;
 
     let config: Config = toml::from_str(&config)?;
-
-    let client = Client::new();
-    let media_players = get_media_players(
-        &client,
-        &config.home_assistant_url,
-        &config.home_assistant_token,
-        config.entity_ids,
-    )
-    .await
-    .unwrap();
-
-    // Channel to handle events from HA to MPRIS
-    let mut channels = HashMap::new();
-
-    // Channel to handle events from MPRIS to HA
-    let (mpris_tx, mpris_rx) = mpsc::channel(100);
-    let mut set = JoinSet::new();
-
-    for player in &media_players {
-        let (ha_tx, ha_rx) = mpsc::channel(100);
-        channels.insert(player.entity_id.clone(), ha_tx);
-
-        println!("{:?}", player.clone());
-        let _mp_task = set.spawn(new_mpris_player(
-            player.entity_id.clone(),
-            player.clone(),
-            config.home_assistant_url.clone(),
-            ha_rx,
-            mpris_tx.clone(),
-        ));
-    }
-
-    let media_players: HashMap<_, _> = media_players
-        .iter()
-        .map(|d| {
-            (
-                d.entity_id.clone(),
-                MediaPlayerState::new(
-                    d.entity_id.clone(),
-                    config.home_assistant_url.to_string(),
-                    config.home_assistant_token.to_string(),
-                )
-                .unwrap(),
-            )
-        })
-        .collect();
-
-    let parsed_url = url::Url::parse(&config.home_assistant_url)?;
-    let websocket_url = format!(
-        "ws://{}{}/api/websocket",
-        parsed_url
-            .host_str()
-            .ok_or_eyre("Can not get host from HA URL")?,
-        match parsed_url.port() {
-            Some(v) => format!(":{}", v),
-            None => "".to_string(),
-        },
-    );
-    println!("Connected to {}", websocket_url);
-    let _ha_task = set.spawn(listen_for_events(
-        websocket_url,
-        config.home_assistant_token.to_string(),
-        media_players,
-        channels,
-        mpris_rx,
-    ));
-
-    while (set.join_next().await).is_some() {}
-    Ok(())
+    Ok(config)
 }
