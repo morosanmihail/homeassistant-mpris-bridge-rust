@@ -32,6 +32,15 @@ pub struct MediaPlayerMetadata {
     pub volume: f64,
     pub art_url: String,
     pub playing: bool,
+    pub shuffle: bool,
+    pub repeat: HALoopStatus,
+}
+
+#[derive(Debug)]
+pub enum HALoopStatus {
+    None,
+    Track,
+    Playlist,
 }
 
 #[derive(Debug)]
@@ -41,6 +50,10 @@ pub enum HAEvent {
     MetadataUpdated(MediaPlayerMetadata),
     Next,
     Previous,
+    Volume(f64),
+    SetShuffle(bool),
+    SetLoop(HALoopStatus),
+    Seek(i64),
 }
 
 pub fn json_to_metadata(
@@ -87,6 +100,21 @@ pub fn json_to_metadata(
             .as_f64()
             .ok_or_eyre("Could not convert Number to f64")?,
         playing,
+        repeat: match metadata
+            .get("repeat")
+            .unwrap_or(&json!("off"))
+            .to_string()
+            .trim_matches(['\"'])
+        {
+            "one" => HALoopStatus::Track,
+            "all" => HALoopStatus::Playlist,
+            _ => HALoopStatus::None,
+        },
+        shuffle: metadata
+            .get("shuffle")
+            .unwrap_or(&json!(false))
+            .as_bool()
+            .ok_or_eyre("Could not convert Bool to boolean")?,
     })
 }
 
@@ -100,20 +128,57 @@ impl MediaPlayerState {
     }
 
     pub async fn play(&self) -> Result<()> {
-        self.send_command_to_home_assistant("media_play").await
+        self.send_command_to_home_assistant("media_play", None)
+            .await
     }
 
     pub async fn pause(&self) -> Result<()> {
-        self.send_command_to_home_assistant("media_pause").await
+        self.send_command_to_home_assistant("media_pause", None)
+            .await
     }
 
     pub async fn next(&self) -> Result<()> {
-        self.send_command_to_home_assistant("media_next_track")
+        self.send_command_to_home_assistant("media_next_track", None)
             .await
     }
 
     pub async fn previous(&self) -> Result<()> {
-        self.send_command_to_home_assistant("media_previous_track")
+        self.send_command_to_home_assistant("media_previous_track", None)
+            .await
+    }
+
+    pub async fn set_volume(&self, volume: f64) -> Result<()> {
+        let mut extras = serde_json::Map::new();
+        extras.insert("volume_level".to_string(), json!(volume));
+        self.send_command_to_home_assistant("volume_set", Some(extras))
+            .await
+    }
+
+    pub async fn set_shuffle(&self, shuffle: bool) -> Result<()> {
+        let mut extras = serde_json::Map::new();
+        extras.insert("shuffle".to_string(), json!(shuffle));
+        self.send_command_to_home_assistant("shuffle_set", Some(extras))
+            .await
+    }
+
+    pub async fn set_loop(&self, loop_status: HALoopStatus) -> Result<()> {
+        let mut extras = serde_json::Map::new();
+        extras.insert(
+            "repeat".to_string(),
+            json!(match loop_status {
+                HALoopStatus::None => "off",
+                HALoopStatus::Track => "one",
+                HALoopStatus::Playlist => "all",
+            }),
+        );
+        self.send_command_to_home_assistant("repeat_set", Some(extras))
+            .await
+    }
+
+    pub async fn set_seek(&self, position: i64) -> Result<()> {
+        let mut extras = serde_json::Map::new();
+        extras.insert("seek_position".to_string(), json!(position));
+        self.send_command_to_home_assistant("media_seek", Some(extras))
             .await
     }
 
@@ -143,12 +208,25 @@ impl MediaPlayerState {
         Ok(events)
     }
 
-    pub async fn send_command_to_home_assistant(&self, command: &str) -> Result<()> {
+    pub async fn send_command_to_home_assistant(
+        &self,
+        command: &str,
+        extra_params: Option<serde_json::Map<String, Value>>,
+    ) -> Result<()> {
         let client = reqwest::Client::new();
         let url = format!("{}/api/services/media_player/{}", self.ha_url, command);
-        let params = serde_json::json!({
-            "entity_id": self.entity_id,
-        });
+
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "entity_id".to_string(),
+            Value::String(self.entity_id.clone()),
+        );
+
+        if let Some(extras) = extra_params {
+            for (k, v) in extras {
+                params.insert(k, v);
+            }
+        }
 
         client
             .post(url)
@@ -259,6 +337,10 @@ pub async fn listen_for_events(
                         HAEvent::Pause=> mp.pause().await?,
                         HAEvent::Next => mp.next().await?,
                         HAEvent::Previous => mp.previous().await?,
+                        HAEvent::Volume(v) => mp.set_volume(v).await?,
+                        HAEvent::SetShuffle(s) => mp.set_shuffle(s).await?,
+                        HAEvent::SetLoop(l) => mp.set_loop(l).await?,
+                        HAEvent::Seek(p) => mp.set_seek(p).await?,
                         _ => {},
                     };
                 }

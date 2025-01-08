@@ -9,7 +9,9 @@ use tokio::sync::{
     Mutex,
 };
 
-use crate::homeassistant::{json_to_metadata, HAEvent, MediaPlayer, MediaPlayerMetadata};
+use crate::homeassistant::{
+    json_to_metadata, HAEvent, HALoopStatus, MediaPlayer, MediaPlayerMetadata,
+};
 
 #[derive(Clone)]
 pub struct MyPlayer {
@@ -96,13 +98,23 @@ impl PlayerInterface for MyPlayer {
     async fn play_pause(&self) -> fdo::Result<()> {
         let _ = self
             .ha_sender
-            .send((self.entity_id.clone(), HAEvent::Play))
+            .send((
+                self.entity_id.clone(),
+                if self.metadata.lock().await.playing {
+                    HAEvent::Pause
+                } else {
+                    HAEvent::Play
+                },
+            ))
             .await;
         Ok(())
     }
 
     async fn stop(&self) -> fdo::Result<()> {
-        // TODO
+        let _ = self
+            .ha_sender
+            .send((self.entity_id.clone(), HAEvent::Pause))
+            .await;
         Ok(())
     }
 
@@ -114,11 +126,19 @@ impl PlayerInterface for MyPlayer {
         Ok(())
     }
 
-    async fn seek(&self, _offset: Time) -> fdo::Result<()> {
+    async fn seek(&self, offset: Time) -> fdo::Result<()> {
+        let _ = self
+            .ha_sender
+            .send((self.entity_id.clone(), HAEvent::Seek(offset.as_secs())))
+            .await;
         Ok(())
     }
 
-    async fn set_position(&self, _track_id: TrackId, _position: Time) -> fdo::Result<()> {
+    async fn set_position(&self, _track_id: TrackId, position: Time) -> fdo::Result<()> {
+        let _ = self
+            .ha_sender
+            .send((self.entity_id.clone(), HAEvent::Seek(position.as_secs())))
+            .await;
         Ok(())
     }
 
@@ -135,10 +155,26 @@ impl PlayerInterface for MyPlayer {
     }
 
     async fn loop_status(&self) -> fdo::Result<LoopStatus> {
-        Ok(LoopStatus::None)
+        Ok(match self.metadata.lock().await.repeat {
+            HALoopStatus::None => LoopStatus::None,
+            HALoopStatus::Track => LoopStatus::Track,
+            HALoopStatus::Playlist => LoopStatus::Playlist,
+        })
     }
 
-    async fn set_loop_status(&self, _loop_status: LoopStatus) -> mpris_server::zbus::Result<()> {
+    async fn set_loop_status(&self, loop_status: LoopStatus) -> mpris_server::zbus::Result<()> {
+        let _ = self
+            .ha_sender
+            .send((
+                self.entity_id.clone(),
+                HAEvent::SetLoop(match loop_status {
+                    LoopStatus::None => HALoopStatus::None,
+                    LoopStatus::Track => HALoopStatus::Track,
+                    LoopStatus::Playlist => HALoopStatus::Playlist,
+                }),
+            ))
+            .await;
+
         Ok(())
     }
 
@@ -151,10 +187,14 @@ impl PlayerInterface for MyPlayer {
     }
 
     async fn shuffle(&self) -> fdo::Result<bool> {
-        Ok(false)
+        Ok(self.metadata.lock().await.shuffle)
     }
 
-    async fn set_shuffle(&self, _shuffle: bool) -> mpris_server::zbus::Result<()> {
+    async fn set_shuffle(&self, shuffle: bool) -> mpris_server::zbus::Result<()> {
+        let _ = self
+            .ha_sender
+            .send((self.entity_id.clone(), HAEvent::SetShuffle(shuffle)))
+            .await;
         Ok(())
     }
 
@@ -172,8 +212,11 @@ impl PlayerInterface for MyPlayer {
         Ok(self.metadata.lock().await.volume)
     }
 
-    async fn set_volume(&self, _volume: Volume) -> mpris_server::zbus::Result<()> {
-        // TODO
+    async fn set_volume(&self, volume: Volume) -> mpris_server::zbus::Result<()> {
+        let _ = self
+            .ha_sender
+            .send((self.entity_id.clone(), HAEvent::Volume(volume)))
+            .await;
         Ok(())
     }
 
@@ -206,7 +249,7 @@ impl PlayerInterface for MyPlayer {
     }
 
     async fn can_seek(&self) -> fdo::Result<bool> {
-        Ok(false)
+        Ok(true)
     }
 
     async fn can_control(&self) -> fdo::Result<bool> {
@@ -251,7 +294,6 @@ pub async fn new_mpris_player(
                 HAEvent::MetadataUpdated(metadata_update) => {
                     player
                         .properties_changed([
-                            Property::CanSeek(false),
                             Property::Metadata(
                                 Metadata::builder()
                                     .title(metadata_update.title)
@@ -262,17 +304,19 @@ pub async fn new_mpris_player(
                                     )
                                     .build(),
                             ),
+                            Property::CanSeek(true),
+                            Property::LoopStatus(match metadata_update.repeat {
+                                HALoopStatus::None => LoopStatus::None,
+                                HALoopStatus::Playlist => LoopStatus::Playlist,
+                                HALoopStatus::Track => LoopStatus::Track,
+                            }),
+                            Property::Shuffle(metadata_update.shuffle),
                         ])
                         .await?;
                     {
                         let mut metadata = metadata_lock.lock().await;
                         metadata.position = metadata_update.position;
                     }
-                    player
-                        .emit(mpris_server::Signal::Seeked {
-                            position: Time::from_secs(metadata_update.position),
-                        })
-                        .await?;
                 }
                 _ => {}
             }

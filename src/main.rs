@@ -89,9 +89,7 @@ async fn main() -> Result<()> {
         mpris_rx,
     ));
 
-    while (set.join_next().await).is_some() {
-        println!("------ GOT SOME RESULT");
-    }
+    while (set.join_next().await).is_some() {}
     Ok(())
 }
 
