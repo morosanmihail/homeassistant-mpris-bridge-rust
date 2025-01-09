@@ -1,11 +1,14 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use eyre::{OptionExt, Result};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Error, Value};
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{
+    mpsc::{Receiver, Sender},
+    Mutex,
+};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use url::Url;
 
@@ -269,7 +272,7 @@ pub async fn listen_for_events(
     access_token: String,
     mut media_players: HashMap<String, MediaPlayerState>,
     channels: HashMap<String, Sender<HAEvent>>,
-    mut mpris_rx: Receiver<(String, HAEvent)>,
+    mpris_rx: Arc<Mutex<Receiver<(String, HAEvent)>>>,
 ) -> Result<()> {
     let (ws_stream, _) = connect_async(ha_url).await?;
     let (mut write, mut read) = ws_stream.split();
@@ -304,7 +307,12 @@ pub async fn listen_for_events(
     loop {
         tokio::select! {
             event = read.next() => {
-                let Some(Ok(Message::Text(text))) = event else { continue };
+                let text = match event {
+                    Some(Ok(Message::Text(t))) => t,
+                    Some(Ok(Message::Close(_))) => break Err(eyre::eyre!("Channel closed")),
+                    None => break Err(eyre::eyre!("Restarting websocket channel due to unknown reason")),
+                    _ => continue
+                };
                 let Ok(event): Result<serde_json::Value, Error> = serde_json::from_str(&text) else { continue };
                 let Some(entity_id) = event.get("event").and_then(|e| e.get("data")).and_then(|d| d.get("entity_id")).and_then(|e| e.as_str()) else { continue };
                 let Some(media_player) = media_players.get_mut(entity_id) else { continue };
@@ -329,7 +337,12 @@ pub async fn listen_for_events(
                     Err(e) => println!("Died during metadata update event with {e}"),
                 };
             }
-            Some((entity_id, msg)) = mpris_rx.recv() => {
+
+            result = async {
+                let mut guard = mpris_rx.lock().await;
+                guard.recv().await
+            } => {
+                let Some((entity_id, msg)) = result else { continue };
                 let media = media_players.get_mut(&entity_id);
                 if let Some(mp) = media {
                     match msg {
@@ -344,6 +357,10 @@ pub async fn listen_for_events(
                         _ => {},
                     };
                 }
+            }
+
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                break Err(eyre::eyre!("Timed out"));
             }
         }
     }

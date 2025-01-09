@@ -1,10 +1,13 @@
-use std::{collections::HashMap, io::Write, path::PathBuf};
+use std::{collections::HashMap, io::Write, path::PathBuf, sync::Arc, time::Duration};
 
 use eyre::{OptionExt, Result};
 use homeassistant::{get_media_players, listen_for_events, MediaPlayerState};
 use mpris::new_mpris_player;
 use serde::{Deserialize, Serialize};
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::{
+    sync::{mpsc, Mutex},
+    task::JoinSet,
+};
 
 mod homeassistant;
 mod mpris;
@@ -54,6 +57,7 @@ async fn main() -> Result<()> {
 
     // Channel to handle events from MPRIS to HA
     let (mpris_tx, mpris_rx) = mpsc::channel(100);
+    let mpris_rx = Arc::new(Mutex::new(mpris_rx));
     let mut set = JoinSet::new();
 
     let mut media_player_states = HashMap::new();
@@ -81,13 +85,25 @@ async fn main() -> Result<()> {
     }
 
     println!("Connected to {}", websocket_url);
-    let _ha_task = set.spawn(listen_for_events(
-        websocket_url,
-        config.home_assistant_token.to_string(),
-        media_player_states,
-        channels,
-        mpris_rx,
-    ));
+    let _ha_task = set.spawn(async move {
+        loop {
+            let websocket_url = websocket_url.clone();
+            let media_player_states = media_player_states.clone();
+            let channels = channels.clone();
+            if let Err(e) = listen_for_events(
+                websocket_url,
+                config.home_assistant_token.to_string(),
+                media_player_states,
+                channels,
+                mpris_rx.clone(),
+            )
+            .await
+            {
+                println!("WebSocket connection lost. {e}. Retrying...");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    });
 
     while (set.join_next().await).is_some() {}
     Ok(())
