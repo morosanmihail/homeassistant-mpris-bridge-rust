@@ -296,8 +296,8 @@ pub async fn new_mpris_player(
                         .properties_changed([
                             Property::Metadata(
                                 Metadata::builder()
-                                    .title(metadata_update.title)
-                                    .artist(vec![metadata_update.artist])
+                                    .title(&metadata_update.title)
+                                    .artist(vec![&metadata_update.artist])
                                     .length(Time::from_secs(metadata_update.duration))
                                     .art_url(
                                         metadata_update.art_url.trim_matches(['\"']).to_string(),
@@ -315,7 +315,7 @@ pub async fn new_mpris_player(
                         .await?;
                     {
                         let mut metadata = metadata_lock.lock().await;
-                        metadata.position = metadata_update.position;
+                        *metadata = metadata_update.clone();
                     }
                 }
                 _ => {}

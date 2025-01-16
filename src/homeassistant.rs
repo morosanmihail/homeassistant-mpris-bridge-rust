@@ -26,7 +26,7 @@ pub struct MediaPlayerState {
     pub entity_id: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MediaPlayerMetadata {
     pub title: String,
     pub artist: String,
@@ -39,7 +39,7 @@ pub struct MediaPlayerMetadata {
     pub repeat: HALoopStatus,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum HALoopStatus {
     None,
     Track,
