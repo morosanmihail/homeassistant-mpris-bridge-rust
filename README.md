@@ -23,6 +23,5 @@ Yes, I will fix the error so it at least exits nicely and explains what happened
 
 ## Missing features
 
-- It currently does not handle volume
 - Position seeking seems buggy. Uncertain if that's on me, or on MPRIS 
 
